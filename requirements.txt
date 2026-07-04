@@ -1,0 +1,12 @@
+# System Requirements
+
+node >= 20.0.0
+npm >= 10.0.0
+postgresql >= 16.0
+redis >= 7.0
+docker >= 24.0
+docker-compose >= 2.0
+git >= 2.40
+
+# Redis is optional. Without it, distributed locking and WebSocket pub/sub are disabled.
+# Application-level dependencies are managed via npm — see backend/package.json and frontend/package.json.

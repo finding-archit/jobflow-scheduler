@@ -1,0 +1,311 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth & Multi-tenancy ────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  avatarUrl    String?  @map("avatar_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  memberships OrgMembership[]
+
+  @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships OrgMembership[]
+  projects    Project[]
+
+  @@map("organizations")
+}
+
+model OrgMembership {
+  id     String           @id @default(uuid())
+  userId String           @map("user_id")
+  orgId  String           @map("org_id")
+  role   OrgRole          @default(MEMBER)
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@map("org_memberships")
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// ─── Projects ────────────────────────────────────────────────────────────────
+
+model Project {
+  id         String   @id @default(uuid())
+  orgId      String   @map("org_id")
+  name       String
+  slug       String
+  apiKeyHash String   @map("api_key_hash")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  queues  Queue[]
+  workers Worker[]
+
+  @@unique([orgId, slug])
+  @@map("projects")
+}
+
+// ─── Queues ───────────────────────────────────────────────────────────────────
+
+model Queue {
+  id               String        @id @default(uuid())
+  projectId        String        @map("project_id")
+  name             String
+  description      String?
+  priority         Int           @default(0)
+  concurrencyLimit Int           @default(10) @map("concurrency_limit")
+  paused           Boolean       @default(false)
+  retryStrategy    RetryStrategy @default(EXPONENTIAL) @map("retry_strategy")
+  maxRetries       Int           @default(3) @map("max_retries")
+  retryDelayMs     Int           @default(1000) @map("retry_delay_ms")
+  retryMaxDelayMs  Int           @default(60000) @map("retry_max_delay_ms")
+  retryMultiplier  Float         @default(2.0) @map("retry_multiplier")
+  rateLimitPerMin  Int?          @map("rate_limit_per_min")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  jobs    Job[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+  @@map("queues")
+}
+
+enum RetryStrategy {
+  FIXED
+  LINEAR
+  EXPONENTIAL
+}
+
+// ─── Jobs ─────────────────────────────────────────────────────────────────────
+
+model Job {
+  id             String    @id @default(uuid())
+  queueId        String    @map("queue_id")
+  type           String
+  payload        Json      @default("{}")
+  status         JobStatus @default(QUEUED)
+  priority       Int       @default(0)
+  scheduledAt    DateTime? @map("scheduled_at")
+  cronExpression String?   @map("cron_expression")
+  batchId        String?   @map("batch_id")
+  parentJobId    String?   @map("parent_job_id")
+  idempotencyKey String?   @map("idempotency_key")
+  maxRetries     Int       @default(3) @map("max_retries")
+  retryCount     Int       @default(0) @map("retry_count")
+  timeout        Int       @default(30000) // ms
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  queue          Queue          @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  parentJob      Job?           @relation("JobChildren", fields: [parentJobId], references: [id])
+  childJobs      Job[]          @relation("JobChildren")
+  executions     JobExecution[]
+  logs           JobLog[]
+  dlqEntry       DeadLetterQueue?
+  scheduledJob   ScheduledJob?
+  dependsOn      WorkflowDep[]  @relation("DependentJob")
+  dependencies   WorkflowDep[]  @relation("DependencyJob")
+
+  @@unique([queueId, idempotencyKey])
+  @@index([queueId, status, scheduledAt])
+  @@index([status, scheduledAt])
+  @@index([batchId])
+  @@map("jobs")
+}
+
+enum JobStatus {
+  QUEUED
+  SCHEDULED
+  CLAIMED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  DEAD
+}
+
+// ─── Job Executions ───────────────────────────────────────────────────────────
+
+model JobExecution {
+  id            String          @id @default(uuid())
+  jobId         String          @map("job_id")
+  workerId      String          @map("worker_id")
+  attemptNumber Int             @map("attempt_number")
+  status        ExecutionStatus @default(RUNNING)
+  startedAt     DateTime        @default(now()) @map("started_at")
+  completedAt   DateTime?       @map("completed_at")
+  durationMs    Int?            @map("duration_ms")
+  result        Json?
+  errorMessage  String?         @map("error_message")
+  errorStack    String?         @map("error_stack")
+
+  job    Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker Worker    @relation(fields: [workerId], references: [id])
+  logs   JobLog[]
+
+  @@index([jobId])
+  @@index([workerId])
+  @@map("job_executions")
+}
+
+enum ExecutionStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMED_OUT
+}
+
+// ─── Workers ─────────────────────────────────────────────────────────────────
+
+model Worker {
+  id              String       @id @default(uuid())
+  projectId       String       @map("project_id")
+  hostname        String
+  pid             Int
+  status          WorkerStatus @default(IDLE)
+  queueIds        String[]     @map("queue_ids")
+  concurrency     Int          @default(5)
+  lastHeartbeatAt DateTime?    @map("last_heartbeat_at")
+  registeredAt    DateTime     @default(now()) @map("registered_at")
+
+  project     Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  executions  JobExecution[]
+  heartbeats  WorkerHeartbeat[]
+
+  @@index([projectId, status])
+  @@map("workers")
+}
+
+enum WorkerStatus {
+  IDLE
+  BUSY
+  DRAINING
+  OFFLINE
+}
+
+model WorkerHeartbeat {
+  id          String   @id @default(uuid())
+  workerId    String   @map("worker_id")
+  jobsRunning Int      @default(0) @map("jobs_running")
+  memoryMb    Float?   @map("memory_mb")
+  cpuPct      Float?   @map("cpu_pct")
+  timestamp   DateTime @default(now())
+
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, timestamp])
+  @@map("worker_heartbeats")
+}
+
+// ─── Job Logs ─────────────────────────────────────────────────────────────────
+
+model JobLog {
+  id          String   @id @default(uuid())
+  jobId       String   @map("job_id")
+  executionId String?  @map("execution_id")
+  level       LogLevel @default(INFO)
+  message     String
+  metadata    Json     @default("{}")
+  timestamp   DateTime @default(now())
+
+  job       Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  execution JobExecution? @relation(fields: [executionId], references: [id])
+
+  @@index([jobId, timestamp])
+  @@index([executionId])
+  @@map("job_logs")
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+// ─── Scheduled / Cron Jobs ────────────────────────────────────────────────────
+
+model ScheduledJob {
+  id          String   @id @default(uuid())
+  jobId       String   @unique @map("job_id")
+  cronExpr    String   @map("cron_expr")
+  nextRunAt   DateTime @map("next_run_at")
+  lastRunAt   DateTime? @map("last_run_at")
+  enabled     Boolean  @default(true)
+  runCount    Int      @default(0) @map("run_count")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, nextRunAt])
+  @@map("scheduled_jobs")
+}
+
+// ─── Dead Letter Queue ────────────────────────────────────────────────────────
+
+model DeadLetterQueue {
+  id              String   @id @default(uuid())
+  jobId           String   @unique @map("job_id")
+  queueId         String   @map("queue_id")
+  reason          String
+  failureCount    Int      @map("failure_count")
+  originalPayload Json     @map("original_payload")
+  lastError       String?  @map("last_error")
+  aiSummary       String?  @map("ai_summary")
+  failedAt        DateTime @default(now()) @map("failed_at")
+  resolvedAt      DateTime? @map("resolved_at")
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([queueId, failedAt])
+  @@map("dead_letter_queue")
+}
+
+// ─── Workflow Dependencies ────────────────────────────────────────────────────
+
+model WorkflowDep {
+  id            String @id @default(uuid())
+  jobId         String @map("job_id")
+  dependsOnId   String @map("depends_on_id")
+
+  job       Job @relation("DependentJob", fields: [jobId], references: [id], onDelete: Cascade)
+  dependsOn Job @relation("DependencyJob", fields: [dependsOnId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, dependsOnId])
+  @@map("workflow_deps")
+}
