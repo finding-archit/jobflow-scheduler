@@ -49,6 +49,24 @@ Create a new user account and organization.
 ### GET /auth/me
 Returns authenticated user profile with organizations and projects.
 
+**Response 200**
+```json
+{
+  "id": "uuid",
+  "email": "jane@example.com",
+  "name": "Jane Doe",
+  "organizations": [
+    {
+      "id": "uuid",
+      "name": "Acme Corp",
+      "slug": "acme-corp",
+      "role": "OWNER",
+      "projects": [{ "id": "uuid", "name": "My Project", "slug": "my-project" }]
+    }
+  ]
+}
+```
+
 ---
 
 ## Projects
@@ -78,6 +96,25 @@ Rotates the API key. Returns new `apiKey`.
 ### GET /queues?projectId=&page=&limit=
 List queues with live stats (pending/running/completed/failed counts).
 
+**Response 200**
+```json
+{
+  "queues": [
+    {
+      "id": "uuid",
+      "name": "email-delivery",
+      "priority": 10,
+      "concurrencyLimit": 20,
+      "paused": false,
+      "retryStrategy": "EXPONENTIAL",
+      "maxRetries": 5,
+      "stats": { "pending": 12, "running": 3, "failed": 1, "completed": 450, "total": 466 }
+    }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 3 }
+}
+```
+
 ### POST /queues
 ```json
 {
@@ -96,14 +133,36 @@ List queues with live stats (pending/running/completed/failed counts).
 ### GET /queues/:id
 Queue detail with stats.
 
+**Response 200**
+```json
+{
+  "queue": {
+    "id": "uuid",
+    "name": "email-delivery",
+    "paused": false,
+    "retryStrategy": "EXPONENTIAL",
+    "maxRetries": 5,
+    "retryDelayMs": 1000,
+    "retryMaxDelayMs": 60000,
+    "retryMultiplier": 2.0,
+    "rateLimitPerMin": 100,
+    "stats": { "pending": 12, "running": 3, "failed": 1, "completed": 450, "dead": 2 }
+  }
+}
+```
+
 ### PATCH /queues/:id
 Update any queue config field (except name and projectId).
 
 ### POST /queues/:id/pause
 Sets `paused = true`. Workers stop claiming from this queue immediately.
 
+**Response 200**: `{ "queue": { ... , "paused": true }, "message": "Queue paused" }`
+
 ### POST /queues/:id/resume
 Sets `paused = false`.
+
+**Response 200**: `{ "queue": { ... , "paused": false }, "message": "Queue resumed" }`
 
 ### DELETE /queues/:id
 Cascades to all jobs.
@@ -185,14 +244,67 @@ Response: `{ "batchId": "batch_...", "count": 2, "jobs": ["uuid1", "uuid2"] }`
 ### GET /jobs/:id
 Full job detail including executions, logs, DLQ entry, workflow deps.
 
+**Response 200**
+```json
+{
+  "job": {
+    "id": "uuid",
+    "type": "send-email",
+    "status": "COMPLETED",
+    "payload": { "to": "user@example.com" },
+    "retryCount": 1,
+    "maxRetries": 3,
+    "createdAt": "2024-12-01T10:00:00Z",
+    "queue": { "id": "uuid", "name": "email-delivery" },
+    "executions": [
+      {
+        "id": "uuid",
+        "attemptNumber": 1,
+        "status": "FAILED",
+        "errorMessage": "SMTP timeout",
+        "durationMs": 5020,
+        "worker": { "hostname": "worker-1", "pid": 12345 }
+      },
+      {
+        "id": "uuid",
+        "attemptNumber": 2,
+        "status": "COMPLETED",
+        "durationMs": 1230,
+        "worker": { "hostname": "worker-2", "pid": 67890 }
+      }
+    ],
+    "logs": [{ "level": "INFO", "message": "Job created", "timestamp": "..." }],
+    "dlqEntry": null
+  }
+}
+```
+
 ### POST /jobs/:id/cancel
 Cancels QUEUED or SCHEDULED jobs.
 
+**Response 200**: `{ "job": { ..., "status": "CANCELLED" } }`
+
+**Error 409**: `{ "error": "Cannot cancel a job that is already running or completed" }`
+
 ### POST /jobs/:id/retry
-Re-queues FAILED, DEAD, or CANCELLED jobs.
+Re-queues FAILED, DEAD, or CANCELLED jobs. Resets `retryCount` to 0 and removes any DLQ entry.
+
+**Response 200**: `{ "job": { ..., "status": "QUEUED", "retryCount": 0 } }`
+
+**Error 409**: `{ "error": "Only failed, dead, or cancelled jobs can be retried" }`
 
 ### GET /jobs/:id/logs?level=&limit=
 Execution logs for a job.
+
+**Response 200**
+```json
+{
+  "logs": [
+    { "id": "uuid", "level": "INFO", "message": "Job created with status QUEUED", "timestamp": "..." },
+    { "id": "uuid", "level": "ERROR", "message": "SMTP connection refused", "timestamp": "..." }
+  ]
+}
+```
 
 ---
 
@@ -253,11 +365,34 @@ System health: worker counts, DLQ count, uptime.
 ### GET /dlq?projectId=&queueId=&resolved=false
 List DLQ entries.
 
+**Response 200**
+```json
+{
+  "entries": [
+    {
+      "id": "uuid",
+      "jobId": "uuid",
+      "reason": "Max retries exceeded",
+      "failureCount": 5,
+      "lastError": "SMTP connection refused after 30s timeout",
+      "originalPayload": { "to": "user@example.com" },
+      "failedAt": "2024-12-01T14:30:00Z",
+      "resolvedAt": null,
+      "job": { "type": "send-email", "queue": { "name": "email-delivery" } }
+    }
+  ]
+}
+```
+
 ### POST /dlq/:id/resolve
 Mark entry as resolved (no re-execution).
 
+**Response 200**: `{ "entry": { ..., "resolvedAt": "2024-12-01T15:00:00Z" } }`
+
 ### POST /dlq/:id/requeue
-Re-queues the failed job and marks entry resolved.
+Re-queues the failed job, resets retry count, and marks DLQ entry resolved.
+
+**Response 200**: `{ "entry": { ..., "resolvedAt": "..." }, "job": { ..., "status": "QUEUED", "retryCount": 0 } }`
 
 ---
 
