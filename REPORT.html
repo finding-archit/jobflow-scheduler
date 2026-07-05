@@ -608,39 +608,65 @@ RETURNING *</code></pre>
 <div class="page-break"></div>
 <h2 id="s9"><span class="section-num">9.</span> Testing</h2>
 
+<p>The test suite is organized into three layers: unit tests for pure logic, API integration tests that exercise real Fastify routes, and database-level concurrency tests that validate the atomic claiming mechanism.</p>
+
 <h3>Test Results</h3>
-<pre><code> ✓ tests/jobs.test.ts   (6 tests)
- ✓ tests/retry.test.ts  (7 tests)
+<pre><code> ✓ tests/retry.test.ts       (7 tests)  — unit
+ ✓ tests/jobs.test.ts        (6 tests)  — unit
+ ✓ tests/api.test.ts        (27 tests)  — integration
+ ✓ tests/concurrency.test.ts (4 tests)  — database
 
- Test Files  2 passed (2)
- Tests      13 passed (13)</code></pre>
+ Test Files  4 passed (4)
+ Tests      44 passed (44)</code></pre>
 
-<h3>Retry Strategy Tests</h3>
+<h3>Unit Tests — Retry Strategies &amp; Job Lifecycle (13 tests)</h3>
 <table>
-  <thead><tr><th>Test Case</th><th>Validates</th></tr></thead>
+  <thead><tr><th>File</th><th>Test Case</th><th>Validates</th></tr></thead>
   <tbody>
-    <tr><td>Fixed delay calculation</td><td>Returns constant <code>retryDelayMs</code> regardless of attempt number</td></tr>
+    <tr><td rowspan="5"><code>retry.test.ts</code></td><td>Fixed delay calculation</td><td>Returns constant <code>retryDelayMs</code> regardless of attempt number</td></tr>
     <tr><td>Linear delay calculation</td><td>Returns <code>retryDelayMs &times; attemptNumber</code></td></tr>
-    <tr><td>Exponential delay calculation</td><td>Returns <code>retryDelayMs &times; multiplier<sup>(attempt-1)</sup></code></td></tr>
-    <tr><td>Exponential delay capping</td><td>Delay does not exceed <code>retryMaxDelayMs</code></td></tr>
+    <tr><td>Exponential delay with cap</td><td>Returns <code>retryDelayMs &times; multiplier<sup>(attempt-1)</sup></code>, capped at max</td></tr>
     <tr><td>Jitter application</td><td>Computed delay falls within &plusmn;10% of the base delay</td></tr>
-    <tr><td>Valid cron expressions</td><td>Accepts standard 5-field cron expressions</td></tr>
-    <tr><td>Invalid cron expressions</td><td>Rejects malformed cron strings</td></tr>
+    <tr><td>Cron validation</td><td>Accepts valid cron, rejects malformed strings, computes next run</td></tr>
+    <tr><td rowspan="4"><code>jobs.test.ts</code></td><td>Initial status determination</td><td>Immediate &rarr; QUEUED, delayed/cron/scheduled &rarr; SCHEDULED</td></tr>
+    <tr><td>Retry threshold</td><td><code>retryCount &lt; maxRetries</code> &rarr; retry, otherwise stop</td></tr>
+    <tr><td>DLQ routing</td><td><code>retryCount &ge; maxRetries</code> &rarr; send to Dead Letter Queue</td></tr>
+    <tr><td>Status immutability</td><td>COMPLETED jobs cannot transition to any other status</td></tr>
   </tbody>
 </table>
 
-<h3>Job Lifecycle Tests</h3>
+<h3>API Integration Tests — Route Handlers (27 tests)</h3>
+<p>These tests instantiate a real Fastify server with all routes registered and inject HTTP requests. They exercise the full request lifecycle: Zod validation, database operations, JWT authentication, and error handling.</p>
 <table>
-  <thead><tr><th>Test Case</th><th>Validates</th></tr></thead>
+  <thead><tr><th>Suite</th><th>Tests</th><th>Key Assertions</th></tr></thead>
   <tbody>
-    <tr><td>Initial job status</td><td>Jobs are created with status QUEUED and retryCount 0</td></tr>
-    <tr><td>Status transitions</td><td>QUEUED &rarr; CLAIMED &rarr; RUNNING &rarr; COMPLETED is a valid path</td></tr>
-    <tr><td>Failed job retry</td><td>FAILED status increments retryCount and re-schedules when under max</td></tr>
-    <tr><td>DLQ routing</td><td>Jobs with retryCount &ge; maxRetries transition to DEAD</td></tr>
-    <tr><td>Cancelled job state</td><td>CANCELLED jobs retain their original payload and metadata</td></tr>
-    <tr><td>Completed job immutability</td><td>COMPLETED jobs cannot transition to any other status</td></tr>
+    <tr><td>Auth API</td><td>6</td><td>Register returns JWT + org; duplicate email &rarr; 409; login works; wrong password &rarr; 401; unauthenticated &rarr; 401; <code>/me</code> returns profile with orgs</td></tr>
+    <tr><td>Queue API</td><td>5</td><td>Create queue with retry policy; invalid name &rarr; 400; list returns live stats; pause sets <code>paused=true</code>; resume restores it</td></tr>
+    <tr><td>Job API</td><td>11</td><td>Immediate &rarr; QUEUED; delayed &rarr; SCHEDULED; cron &rarr; SCHEDULED + scheduled_jobs entry; invalid cron &rarr; 400; paused queue &rarr; 409; batch creates N jobs atomically; pagination; status filter; job detail includes executions &amp; logs; cancel; retry resets retryCount</td></tr>
+    <tr><td>Input Validation</td><td>3</td><td>Missing fields &rarr; 400 with field-level details; invalid email format; password &lt; 8 chars</td></tr>
+    <tr><td>Health Check</td><td>1</td><td><code>/health</code> &rarr; 200 with status ok</td></tr>
+    <tr><td><em>Unauthenticated access</em></td><td>1</td><td>Protected routes without JWT &rarr; 401</td></tr>
   </tbody>
 </table>
+
+<h3>Concurrency &amp; Reliability Tests — Database Level (4 tests)</h3>
+<p>These tests run against a live PostgreSQL instance and validate the core reliability claims of the system.</p>
+<table>
+  <thead><tr><th>Test Case</th><th>What It Proves</th></tr></thead>
+  <tbody>
+    <tr><td>Concurrent claims produce no duplicates</td><td>10 simulated workers &times; 5 claim attempts for 20 jobs. Every claimed job ID appears exactly once in the results — no double assignments.</td></tr>
+    <tr><td>SKIP LOCKED skips locked rows</td><td>2 workers claim 1 job simultaneously. Exactly one succeeds, the other returns null without blocking.</td></tr>
+    <tr><td>DLQ entry on max retries</td><td>When <code>retryCount &ge; maxRetries</code>, job transitions to DEAD and a <code>dead_letter_queue</code> row is created with the original payload, reason, and failure count.</td></tr>
+    <tr><td>DLQ requeue resets state</td><td>Requeue sets job back to QUEUED, resets <code>retryCount</code> to 0, and deletes the DLQ entry.</td></tr>
+  </tbody>
+</table>
+
+<h3>Running Tests</h3>
+<pre><code># Unit tests (no database required)
+cd backend && npx vitest run tests/retry.test.ts tests/jobs.test.ts
+
+# Full suite (requires PostgreSQL)
+cd backend && npm test</code></pre>
 
 <!-- 10. SETUP INSTRUCTIONS -->
 <div class="page-break"></div>
